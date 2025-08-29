@@ -1,0 +1,273 @@
+---
+title: "Rap Project"
+author: "Ishan Koroth"
+date: "2022-12-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(tidyverse)
+library(plotly)
+library(htmltools)
+library(devtools)
+library(caret)
+library(NbClust)
+library(data.table)
+library(ROCR)
+library(MLmetrics)
+library(mltools)
+library(rpart.plot)
+library(class)
+library(irr)
+library(RColorBrewer)
+library(ggplot2)
+```
+
+## Load Spotify Data
+```{r, echo=FALSE}
+spotify = read.csv("~/Downloads/spotify_songs.csv")
+```
+
+## Clean Data
+```{r, warning = FALSE}
+#Should drop track_id (1), track_album_id (5), playlist_name (8), playlist_id (9) 
+spotify = spotify[-c(1,5,8,9)]
+
+# What does mode mean? Indicates the modality (major or minor) of a track. Major is represented by 1 and minor is 0
+spotify$mode <- gsub('1', 'major', spotify$mode)
+spotify$mode <- gsub('0', 'minor', spotify$mode)
+
+
+spotify$mode <- as.factor(spotify$mode)
+
+# Need to convert duration_ms to numeric
+spotify[,c(19)] <- sapply(spotify[,c(19)], as.numeric)
+
+#Only one NA from this conversion so let's do complete cases
+spotify<-spotify[complete.cases(spotify),]
+
+#Change datatype to factors for playlist_genere and playlist_subgenere
+spotify[,c(6,7)] <- lapply(spotify[,c(6,7)], as.factor)
+
+#For the decision tree, need to drop the character columns (1,2,4,5) -- Can't have characters
+spotify = spotify[-c(1,2,4,5)]
+```
+
+## Question, background information on the data, and why you are asking this question
+What attributes influence the popularity of a song? And, how is this similar or different between different music genres? 
+
+Information on the data: 
+This is a dataset with information on songs from Spotify. It includes more than 32,800 songs. For each song, information on the artist, release date, genre, and quantifiable attributes are included.  
+
+We are asking this question because we are all music fans, though each of us likes different artists, genres, and specific songs. Often when we first hear a song, we have a reaction to whether or not we like it; however, this is more based on a general feeling. We are wondering what data science can reveal about what attributes of songs contribute to whether it is popular or not. 
+
+## Past related research 
+
+Researchers at Carleton University sought to answer the question of: can big data really predict what makes a song popular? The findings of their study indicated that quantifiable acoustic elements, such as acousticness, energy and speechiness, did not predict the popularity of a song. This led them to the conclusion that one needs to consider contextual factors that may contribute to the success of a song on spotify. In particular, they referenced attached listeners, which could be an important factor in song popularity. (DOI:10.1109/COMPSAC54236.2022.00042)
+
+Carlos V. S. Araujo and other reserachers have published a paper on machine learning models to predict music popularity on streaming platforms. Their models attempted to predict whether a song would appear in Spotify's Top 50 list. In the paper, they included Gaussian Naive Bayes (GNB), KNN,  Logistic  Regression, and  SupportVector Machine (SVM) with RBF kernel models. Of these, SVM with RBF kernel had highest accuracy with  accuracy,  precision  and AUC above 80%. This paper supports the idea that it is possible to predict music popularity on a streaming service using the quantifiable attributes of a song.  (http://dx.doi.org/10.22456/2175-2745.107021) 
+
+## Exploratory Data Analysis
+```{r}
+summary(spotify) 
+
+hist(spotify$track_popularity)
+
+ggplot(spotify, aes(x = factor(`key`), y = `track_popularity`)) + 
+  stat_summary(fun = "mean", geom = "bar")
+
+plot(spotify$instrumentalness,spotify$track_popularity)
+plot(spotify$danceability,spotify$track_popularity)
+plot(spotify$energy,spotify$track_popularity)
+plot(spotify$loudness,spotify$track_popularity)
+```
+
+This exploratory data analysis shows that most songs included in this dataset are not popular. The bar plot of the key variable also shows that this is likely not very important in predicting popularity because for each key the average track popularity is roughly 40. Loudness is heavily clustered around -10. 
+
+## Methods
+To answer the question of what attributes influence the popularity of a song and how this compares between genres, we will use a decision tree. The decision tree will allow us to visually represent the importance of different quantifiable attributes of a song in predicting popularity. Originally, we planned to create decision tree models with the target variable being track_popularity as a continuous variable from 0-100. For this we planned to use Rsquared and RMSE as our evaluation metrics. However, when training the initial models to predict this continous varaible, we found that the accuracy of the models were extremely low. No attempts at tuning the decision tree model produced a significant improvement in regard to either evaluation metric. This led us to return to our original question and shift our approach. Instead of predicting the continous variable, we decided to split track_popularity for each genre into three buckets: high, medium, and low popularity. The thought behind this was that the exact number for popularity was not truly what was important for an artist. Instead, what may be important is simply whether a song has high popularity in comparison to other songs in the same genre. The evaluation metric that we used for these models was Kappa because Kappa is a useful evaluation metric for multi-class models. 
+
+## Split up by genre to build seprate models
+```{r}
+edm<- spotify[which(spotify$playlist_genre == "edm"),]
+latin<- spotify[which(spotify$playlist_genre == "latin"),]
+pop<- spotify[which(spotify$playlist_genre == "pop"),]
+rb<- spotify[which(spotify$playlist_genre == "r&b"),]
+rap<- spotify[which(spotify$playlist_genre == "rap"),]
+rock<- spotify[which(spotify$playlist_genre == "rock"),]
+
+View(rap)
+
+plot(rap$instrumentalness,rap$track_popularity)
+plot(rap$danceability,rap$track_popularity)
+plot(rap$energy,rap$track_popularity)
+plot(rap$loudness,rap$track_popularity)
+
+```
+
+## Model for Rap
+
+### Train, Tune, and Test Split
+```{r}
+# Creating the first split for the 80%
+set.seed(2001)
+part_index_1 <- caret::createDataPartition(rap$track_popularity,
+                                           times=1,
+                                           p = 0.80,
+                                           groups=1,
+                                           list=FALSE)
+
+rap_train <- rap[part_index_1, ]
+rap_tune_and_test <- rap[-part_index_1, ]
+
+#Then, we need to use the same function again to create the tuning set 
+
+rap_tune_and_test_index <- createDataPartition(rap_tune_and_test$track_popularity,
+                                           p = .5,
+                                           list = FALSE,
+                                           times = 1)
+
+rap_tune <- rap_tune_and_test[rap_tune_and_test_index, ]
+rap_test <- rap_tune_and_test[-rap_tune_and_test_index, ]
+
+```
+
+### Build Rap Model
+
+```{r}
+rap_features <- rap_train[,-1]#dropping 1 because it's the target variable. 
+
+rap_target <- rap_train$track_popularity
+
+#Three steps in building a caret ML model
+#Step 1: Cross validation process-the process by which the training data will be used to build the initial model must be set.
+
+fitControl <- trainControl(method = "repeatedcv",
+                          number = 10,
+                          repeats = 5) 
+
+tree.grid <- expand.grid(maxdepth=c(3:20))
+
+rap_mdl_1 <- train(x=rap_features,
+                y=rap_target,
+                method="rpart2",
+                trControl=fitControl,
+                tuneGrid=tree.grid,
+                metric="RMSE")
+
+varImp(rap_mdl_1)
+
+coul <- brewer.pal(5, "Set2")
+
+barplot(rap_mdl_1$finalModel$variable.importance, col=coul)
+
+rpart.plot(rap_mdl_1$finalModel, type=5,extra=101)
+
+rap_mdl_1$results
+
+```
+For this model, the optimal maxdepth = 3. RMSE = 21.49486, which is a very high error rate since the track_popularity is on a scale from 0-100. 
+Rsquared = 0.1417226, which is also a very poor evaluation since Rsquared is from 0-1 and we want to get closer to 1
+
+These metrics are what led us to switch our approach as descrived above. For a musician, the important outcome may not be a numeric representation of the popularity of a song, but rather it may be whether a song was generally popular. This may also be relative for the genre of music based on the number or types of listeners. Let's turn the continuous popularity column into a factor with high, medium, and low.
+
+### Build model for high and low popularity
+```{r}
+# To do this, need to cut the numeric track_popularity into three levels and re-partition the data to reflect this change
+rap$track_popularity <- cut(rap$track_popularity,
+              breaks=2,
+              labels=c('low', 'high'))
+
+rap_train <- rap[part_index_1, ]
+rap_tune_and_test <- rap[-part_index_1, ]
+rap_tune_and_test_index <- createDataPartition(rap_tune_and_test$track_popularity,
+                                           p = .5,
+                                           list = FALSE,
+                                           times = 1)
+rap_tune <- rap_tune_and_test[rap_tune_and_test_index, ]
+rap_test <- rap_tune_and_test[-rap_tune_and_test_index, ]
+
+table(pop_train$track_popularity)
+
+rap_features <- rap_train[,-1]#dropping 1 because it's target variable. 
+rap_target <- rap_train$track_popularity
+
+fitControl <- trainControl(method = "repeatedcv",
+                          number = 10,
+                          repeats = 10,
+                          classProbs = TRUE,
+                          summaryFunction = twoClassSummary)
+
+set.seed(2000)
+rap_mdl_2 <- train(x=rap_features,
+                y=rap_target,
+                method="rpart2",
+                metric="ROC",
+                preProc = c("center", "scale"),
+                trControl=fitControl,#previously created
+                tuneGrid=tree.grid)
+
+rap_mdl_2
+#Accuracy = .49; Kappa = .19
+#Both of these evaluation metrics show that the model does not work very well 
+
+plot(rap_mdl_2)
+varImp(rap_mdl_2)
+barplot(rap_mdl_2$finalModel$variable.importance, col=coul)
+
+
+rpart.plot(rap_mdl_2$finalModel, type=5,extra=101)
+
+```
+
+Playlist_subgenre and instrumentalness are the two most important variables in this model
+
+### Tuning model 2 for rap
+```{r}
+#Run model and get evaluation metrics accuracy and kappa
+
+rap_pred_tune_r = predict(rap_mdl_2,pop_tune)
+
+rap_tune_df <- data.frame(rap_pred_tune_r, rap_tune$track_popularity)
+
+table_mat <- table(rap_tune$track_popularity, rap_pred_tune_r)
+accuracy_Test <- sum(diag(table_mat)) / sum(table_mat)
+accuracy_Test
+#For the tune dataset, the accuracy was 0.6626087
+
+ratings <- rap_tune_df %>% select(rap_pred_tune_r, rap_tune.track_popularity)
+agree(ratings)
+#%agree = 66.3
+kappa2(ratings)
+#Kappa = 0.31
+```
+
+### Testing model 2 for rap
+```{r}
+rap_pred_test_r = predict(rap_mdl_2,pop_test)
+
+table_mat <- table(rap_test$track_popularity, rap_pred_test_r)
+accuracy_Test <- sum(diag(table_mat)) / sum(table_mat)
+accuracy_Test
+#For the test dataset, the accuracy was 0.6928447
+
+rap_test_df <- data.frame(rap_pred_test_r, rap_test$track_popularity)
+ratings <- rap_test_df %>% select(rap_pred_test_r, rap_test.track_popularity)
+agree(ratings)
+kappa2(ratings)
+```
+
+The final accuracy in the test model for rap using two levels of popularity is 69.3%. The Kappa for this model is 0.373.
+
+Unfortunately, there was an issue dealing with 3 levels due to issues with
+inter polarity and a ROC method was used instead, so the model used for the other 
+genres seems to be having issues with the rap data set.
+
+On the bright side, I was able to determine the important factors, which were
+playlist_subgenre, danceability, and instrumentalness. Compared to the other
+data sets shown in the model evaluation, similar importance factors were also
+prominent with the exception of duration_ms that was found in R&B.
